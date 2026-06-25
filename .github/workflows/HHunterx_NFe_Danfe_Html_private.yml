@@ -1,0 +1,161 @@
+name: HHunterx_NFe_Danfe_Html_private
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version. Leave empty to use yyyy.M.d.run_number.'
+        required: false
+        type: string
+      publish:
+        description: 'Publish HHunterx.NFe.Danfe.Html to GitHub Packages?'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  package:
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set package version
+        id: version
+        shell: pwsh
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:MANUAL_VERSION)) {
+            $now = Get-Date
+            $version = "{0}.{1}.{2}.{3}" -f $now.Year, $now.Month, $now.Day, $env:GITHUB_RUN_NUMBER
+          } else {
+            $version = $env:MANUAL_VERSION
+          }
+
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Package version: $version"
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+            9.0.x
+            8.0.x
+            6.0.x
+
+      - name: Build NFe dependencies
+        shell: pwsh
+        run: |
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\DFe.Classes\DFe.Classes.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\DFe.Utils\DFe.Utils.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\DFe.Wsdl\DFe.Wsdl.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Classes\NFe.Classes.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Servicos\NFe.Servicos.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Utils\NFe.Utils.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Wsdl\NFe.Wsdl.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Wsdl.Standard\NFe.Wsdl.Standard.csproj" -c Release
+
+      - name: Build DANFE HTML
+        shell: pwsh
+        run: dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Danfe.Html\NFe.Danfe.Html.csproj" -c Release
+
+      - name: Pack local feed
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\artifacts\smoke-feed"
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\artifacts\private-nupkg"
+
+          dotnet pack -o "${{ github.workspace }}\artifacts\smoke-feed" -v minimal -c Release -p:NuspecProperties=version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} ".\NuGet\Hercules.NET.NFe.NFCe\Hercules.NET.NFe.NFCe.csproj"
+          dotnet pack -o "${{ github.workspace }}\artifacts\smoke-feed" -v minimal -c Release -p:NuspecProperties=version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} ".\NuGet\HHunterx.NFe.Danfe.Html\HHunterx.NFe.Danfe.Html.csproj"
+
+          Copy-Item "${{ github.workspace }}\artifacts\smoke-feed\HHunterx.NFe.Danfe.Html.*.nupkg" "${{ github.workspace }}\artifacts\private-nupkg\"
+
+      - name: Upload private package
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-danfe-html-nupkg
+          path: ${{ github.workspace }}/artifacts/private-nupkg/*.nupkg
+
+      - name: Upload smoke feed
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-danfe-html-smoke-feed
+          path: ${{ github.workspace }}/artifacts/smoke-feed/*.nupkg
+
+  linux-compatibility:
+    needs: package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Download smoke feed
+        uses: actions/download-artifact@v4
+        with:
+          name: private-danfe-html-smoke-feed
+          path: ${{ github.workspace }}/artifacts/smoke-feed
+
+      - name: Build DANFE HTML source on Linux
+        run: dotnet build -p:Version=${{ needs.package.outputs.version }} "./NFe.Danfe.Html/NFe.Danfe.Html.csproj" -c Release
+
+      - name: Run DANFE HTML compatibility tests on Ubuntu net6
+        run: dotnet test "./NFe.Danfe.Html.Testes/NFe.Danfe.Html.Testes.csproj" -c Release --verbosity normal
+
+      - name: Check DANFE HTML Linux dependency graph
+        run: |
+          dotnet list "./NFe.Danfe.Html/NFe.Danfe.Html.csproj" package --include-transitive > /tmp/danfe-html-packages.txt
+          cat /tmp/danfe-html-packages.txt
+          if grep -E "System\.Drawing\.Common|Microsoft\.WindowsDesktop\.App|PresentationFramework|WindowsBase" /tmp/danfe-html-packages.txt; then
+            echo "DANFE HTML must not depend on Windows/System.Drawing.Common runtime packages."
+            exit 1
+          fi
+
+      - name: Inspect private package
+        run: unzip -l "${{ github.workspace }}"/artifacts/smoke-feed/HHunterx.NFe.Danfe.Html.*.nupkg | grep -F "lib/netstandard2.0/NFe.Danfe.Html.dll"
+
+      - name: Smoke restore private package on Linux net6
+        run: |
+          dotnet new console --framework net6.0 --output /tmp/hhunterx-danfe-html-smoke
+          dotnet nuget add source "${{ github.workspace }}/artifacts/smoke-feed" --name local-zeus-smoke
+          dotnet add /tmp/hhunterx-danfe-html-smoke/hhunterx-danfe-html-smoke.csproj package HHunterx.NFe.Danfe.Html --version ${{ needs.package.outputs.version }} --source "${{ github.workspace }}/artifacts/smoke-feed"
+          dotnet build /tmp/hhunterx-danfe-html-smoke/hhunterx-danfe-html-smoke.csproj -c Release
+
+  publish:
+    needs: [package, linux-compatibility]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download private package
+        uses: actions/download-artifact@v4
+        with:
+          name: private-danfe-html-nupkg
+          path: ${{ github.workspace }}/private-nupkg
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Push private DANFE HTML to GitHub Packages
+        working-directory: ${{ github.workspace }}
+        run: dotnet nuget push private-nupkg/*.nupkg --source "https://nuget.pkg.github.com/hhunterx/index.json" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
