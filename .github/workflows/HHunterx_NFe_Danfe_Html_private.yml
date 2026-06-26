@@ -11,7 +11,7 @@ on:
         required: false
         type: string
       publish:
-        description: 'Publish HHunterx.NFe.Danfe.Html to GitHub Packages?'
+        description: 'Publish HHunterx DANFE HTML packages to GitHub Packages?'
         required: true
         type: boolean
         default: false
@@ -63,9 +63,11 @@ jobs:
           dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Wsdl\NFe.Wsdl.csproj" -c Release
           dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Wsdl.Standard\NFe.Wsdl.Standard.csproj" -c Release
 
-      - name: Build DANFE HTML
+      - name: Build DANFE HTML packages
         shell: pwsh
-        run: dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Danfe.Html\NFe.Danfe.Html.csproj" -c Release
+        run: |
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Danfe.Html\NFe.Danfe.Html.csproj" -c Release
+          dotnet build -p:Version=${{ steps.version.outputs.version }} ".\NFe.Danfe.Html.Pdf\NFe.Danfe.Html.Pdf.csproj" -c Release
 
       - name: Pack local feed
         shell: pwsh
@@ -75,13 +77,15 @@ jobs:
 
           dotnet pack -o "${{ github.workspace }}\artifacts\smoke-feed" -v minimal -c Release -p:NuspecProperties=version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} ".\NuGet\Hercules.NET.NFe.NFCe\Hercules.NET.NFe.NFCe.csproj"
           dotnet pack -o "${{ github.workspace }}\artifacts\smoke-feed" -v minimal -c Release -p:NuspecProperties=version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} ".\NuGet\HHunterx.NFe.Danfe.Html\HHunterx.NFe.Danfe.Html.csproj"
+          dotnet pack -o "${{ github.workspace }}\artifacts\smoke-feed" -v minimal -c Release -p:NuspecProperties=version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} ".\NuGet\HHunterx.NFe.Danfe.Html.Pdf\HHunterx.NFe.Danfe.Html.Pdf.csproj"
 
+          Copy-Item "${{ github.workspace }}\artifacts\smoke-feed\Hercules.NET.NFe.NFCe.*.nupkg" "${{ github.workspace }}\artifacts\private-nupkg\"
           Copy-Item "${{ github.workspace }}\artifacts\smoke-feed\HHunterx.NFe.Danfe.Html.*.nupkg" "${{ github.workspace }}\artifacts\private-nupkg\"
 
-      - name: Upload private package
+      - name: Upload private packages
         uses: actions/upload-artifact@v4
         with:
-          name: private-danfe-html-nupkg
+          name: private-danfe-html-nupkgs
           path: ${{ github.workspace }}/artifacts/private-nupkg/*.nupkg
 
       - name: Upload smoke feed
@@ -110,10 +114,16 @@ jobs:
           path: ${{ github.workspace }}/artifacts/smoke-feed
 
       - name: Build DANFE HTML source on Linux
-        run: dotnet build -p:Version=${{ needs.package.outputs.version }} "./NFe.Danfe.Html/NFe.Danfe.Html.csproj" -c Release
+        run: |
+          dotnet build -p:Version=${{ needs.package.outputs.version }} "./NFe.Danfe.Html/NFe.Danfe.Html.csproj" -c Release
+          dotnet build -p:Version=${{ needs.package.outputs.version }} "./NFe.Danfe.Html.Pdf/NFe.Danfe.Html.Pdf.csproj" -c Release
+          dotnet build -p:Version=${{ needs.package.outputs.version }} "./NFe.Danfe.Html.Testes/NFe.Danfe.Html.Testes.csproj" -c Release
+
+      - name: Install Playwright Chromium on Linux
+        run: pwsh "./NFe.Danfe.Html.Testes/bin/Release/net6.0/playwright.ps1" install --with-deps chromium
 
       - name: Run DANFE HTML compatibility tests on Ubuntu net6
-        run: dotnet test "./NFe.Danfe.Html.Testes/NFe.Danfe.Html.Testes.csproj" -c Release --verbosity normal
+        run: dotnet test "./NFe.Danfe.Html.Testes/NFe.Danfe.Html.Testes.csproj" -c Release --no-build --verbosity normal
 
       - name: Check DANFE HTML Linux dependency graph
         run: |
@@ -125,13 +135,18 @@ jobs:
           fi
 
       - name: Inspect private package
-        run: unzip -l "${{ github.workspace }}"/artifacts/smoke-feed/HHunterx.NFe.Danfe.Html.*.nupkg | grep -F "lib/netstandard2.0/NFe.Danfe.Html.dll"
+        run: |
+          html_package=$(ls "${{ github.workspace }}"/artifacts/smoke-feed/HHunterx.NFe.Danfe.Html.[0-9]*.nupkg)
+          pdf_package=$(ls "${{ github.workspace }}"/artifacts/smoke-feed/HHunterx.NFe.Danfe.Html.Pdf.[0-9]*.nupkg)
+          unzip -l "$html_package" | grep -F "lib/netstandard2.0/NFe.Danfe.Html.dll"
+          unzip -l "$pdf_package" | grep -F "lib/netstandard2.0/NFe.Danfe.Html.Pdf.dll"
 
-      - name: Smoke restore private package on Linux net6
+      - name: Smoke restore private packages on Linux net6
         run: |
           dotnet new console --framework net6.0 --output /tmp/hhunterx-danfe-html-smoke
           dotnet nuget add source "${{ github.workspace }}/artifacts/smoke-feed" --name local-zeus-smoke
           dotnet add /tmp/hhunterx-danfe-html-smoke/hhunterx-danfe-html-smoke.csproj package HHunterx.NFe.Danfe.Html --version ${{ needs.package.outputs.version }} --source "${{ github.workspace }}/artifacts/smoke-feed"
+          dotnet add /tmp/hhunterx-danfe-html-smoke/hhunterx-danfe-html-smoke.csproj package HHunterx.NFe.Danfe.Html.Pdf --version ${{ needs.package.outputs.version }} --source "${{ github.workspace }}/artifacts/smoke-feed"
           dotnet build /tmp/hhunterx-danfe-html-smoke/hhunterx-danfe-html-smoke.csproj -c Release
 
   publish:
@@ -146,7 +161,7 @@ jobs:
       - name: Download private package
         uses: actions/download-artifact@v4
         with:
-          name: private-danfe-html-nupkg
+          name: private-danfe-html-nupkgs
           path: ${{ github.workspace }}/private-nupkg
 
       - name: Setup .NET SDK
@@ -154,7 +169,7 @@ jobs:
         with:
           dotnet-version: 6.0.x
 
-      - name: Push private DANFE HTML to GitHub Packages
+      - name: Push private DANFE HTML packages to GitHub Packages
         working-directory: ${{ github.workspace }}
         run: dotnet nuget push private-nupkg/*.nupkg --source "https://nuget.pkg.github.com/hhunterx/index.json" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
         env:
