@@ -3,16 +3,19 @@
 <style type="text/css">
   @media print {
     @page {
-      margin-left: 15mm;
-      margin-right: 15mm;
+      size: A4 portrait;
+      margin: 0 15mm;
     }
     footer {
+      break-after: page;
       page-break-after: always;
     }
   }
 
   * {
     margin: 0;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
   .ui-widget-content {

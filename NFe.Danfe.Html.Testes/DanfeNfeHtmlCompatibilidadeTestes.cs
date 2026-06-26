@@ -1,8 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using DFe.Classes.Entidades;
 using DFe.Classes.Flags;
+using DFe.Utils;
 using NFe.Classes.Informacoes;
 using NFe.Classes.Informacoes.Destinatario;
 using NFe.Classes.Informacoes.Detalhe;
@@ -18,6 +23,9 @@ using NFe.Classes.Informacoes.Transporte;
 using NFe.Danfe.Html.CrossCutting;
 using NFe.Danfe.Html.Dominio;
 using NFe.Danfe.Html.Interfaces;
+using NFe.Danfe.Html.Pdf;
+using UglyToad.PdfPig;
+using UglyToad.PdfPig.Content;
 using Xunit;
 using NFeModel = NFe.Classes.NFe;
 
@@ -25,6 +33,34 @@ namespace NFe.Danfe.Html.Testes;
 
 public class DanfeNfeHtmlCompatibilidadeTestes
 {
+    [Fact]
+    public async Task GerarHtmlParaVisualizacao_DeveSalvarArquivoEmArtifacts()
+    {
+        var xml = await File.ReadAllTextAsync(ObterCaminhoFixtureXml());
+        var nfe = FuncoesXml.XmlStringParaClasse<NFeModel>(xml);
+        var danfe = new DanfeNFe(nfe, Status.Autorizada, "135240000000001", "HHunterx");
+        IDanfeHtml2 htmlDanfe = new DanfeNfeHtml2(danfe);
+
+        var documento = await htmlDanfe.ObterDocHtmlAsync();
+        var caminhoArquivo = await SalvarPreviewHtmlAsync("danfe-nfe-modelo-55-preview.html", documento.Html);
+
+        Assert.True(File.Exists(caminhoArquivo), $"Arquivo HTML nao foi gerado em {caminhoArquivo}");
+        Assert.Contains("DANFE", documento.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO", documento.Html);
+    }
+
+    [Fact]
+    public async Task GerarHtmlMultipaginaParaVisualizacao_DeveSalvarArquivoEmArtifacts()
+    {
+        var html = await GerarHtmlAsync(quantidadeProdutos: 70);
+        var caminhoArquivo = await SalvarPreviewHtmlAsync("danfe-nfe-modelo-55-multipagina-preview.html", html);
+
+        Assert.True(File.Exists(caminhoArquivo), $"Arquivo HTML nao foi gerado em {caminhoArquivo}");
+        Assert.Contains("Produto teste 001", html);
+        Assert.Contains("Produto teste 070", html);
+        Assert.True(ContarOcorrencias(html, "class=\"page nfeArea\"") >= 2);
+    }
+
     [Fact]
     public async Task ObterDocHtmlAsync_DeveGerarHtmlComCodigoDeBarrasSemPlaceholders()
     {
@@ -54,6 +90,56 @@ public class DanfeNfeHtmlCompatibilidadeTestes
         Assert.DoesNotContain("[itens_products]", html);
     }
 
+    [Fact]
+    public async Task RenderizarPdfAsync_DeveGerarPdfA4ComTexto()
+    {
+        var xml = await File.ReadAllTextAsync(ObterCaminhoFixtureXml());
+        var nfe = FuncoesXml.XmlStringParaClasse<NFeModel>(xml);
+        var htmlDanfe = CriarDanfeHtml(nfe);
+        var renderer = new DanfeHtmlPdfRenderer();
+
+        var pdf = await renderer.RenderizarPdfAsync(htmlDanfe, CriarOpcoesPdfTeste());
+        var caminhoArquivo = await SalvarPreviewPdfAsync("danfe-nfe-modelo-55-preview.pdf", pdf);
+
+        Assert.True(File.Exists(caminhoArquivo), $"Arquivo PDF nao foi gerado em {caminhoArquivo}");
+        AssertPdfHeader(pdf);
+
+        using var stream = new MemoryStream(pdf);
+        using var documento = PdfDocument.Open(stream);
+
+        Assert.Equal(1, documento.NumberOfPages);
+        AssertPaginaA4(documento.GetPage(1));
+
+        var texto = ExtrairTexto(documento);
+        Assert.Contains("DANFE", texto, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO", texto);
+        Assert.Contains("PRODUTO TESTE PARA VISUALIZACAO DO DANFE HTML", texto);
+    }
+
+    [Fact]
+    public async Task RenderizarPdfAsync_DeveGerarPdfMultipaginaA4()
+    {
+        var htmlDanfe = CriarDanfeHtml(CriarNfe(quantidadeProdutos: 70));
+        var renderer = new DanfeHtmlPdfRenderer();
+
+        var pdf = await renderer.RenderizarPdfAsync(htmlDanfe, CriarOpcoesPdfTeste());
+        var caminhoArquivo = await SalvarPreviewPdfAsync("danfe-nfe-modelo-55-multipagina-preview.pdf", pdf);
+
+        Assert.True(File.Exists(caminhoArquivo), $"Arquivo PDF nao foi gerado em {caminhoArquivo}");
+        AssertPdfHeader(pdf);
+
+        using var stream = new MemoryStream(pdf);
+        using var documento = PdfDocument.Open(stream);
+
+        Assert.True(documento.NumberOfPages >= 2);
+        foreach (var pagina in documento.GetPages())
+            AssertPaginaA4(pagina);
+
+        var texto = ExtrairTexto(documento);
+        Assert.Contains("Produto teste 001", texto);
+        Assert.Contains("Produto teste 070", texto);
+    }
+
     private static int ContarOcorrencias(string texto, string valor)
     {
         var total = 0;
@@ -68,15 +154,95 @@ public class DanfeNfeHtmlCompatibilidadeTestes
         return total;
     }
 
+    private static async Task<string> SalvarPreviewHtmlAsync(string nomeArquivo, string html)
+    {
+        var caminhoArquivo = ObterCaminhoPreviewHtml(nomeArquivo);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(caminhoArquivo)!);
+        await File.WriteAllTextAsync(caminhoArquivo, html);
+
+        return caminhoArquivo;
+    }
+
+    private static async Task<string> SalvarPreviewPdfAsync(string nomeArquivo, byte[] pdf)
+    {
+        var caminhoArquivo = ObterCaminhoPreviewPdf(nomeArquivo);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(caminhoArquivo)!);
+        await File.WriteAllBytesAsync(caminhoArquivo, pdf);
+
+        return caminhoArquivo;
+    }
+
+    private static string ObterCaminhoPreviewHtml(string nomeArquivo)
+    {
+        return Path.Combine(ObterRaizRepositorio(), "artifacts", "danfe-html-preview", nomeArquivo);
+    }
+
+    private static string ObterCaminhoPreviewPdf(string nomeArquivo)
+    {
+        return Path.Combine(ObterRaizRepositorio(), "artifacts", "danfe-html-pdf-preview", nomeArquivo);
+    }
+
+    private static string ObterCaminhoFixtureXml()
+    {
+        return Path.Combine(ObterRaizRepositorio(), "NFe.Danfe.Html.Testes", "Fixtures", "nfe-modelo-55-preview.xml");
+    }
+
+    private static string ObterRaizRepositorio()
+    {
+        var diretorio = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (diretorio != null && !File.Exists(Path.Combine(diretorio.FullName, "NFe.Danfe.Html", "Readme.txt")))
+        {
+            diretorio = diretorio.Parent;
+        }
+
+        return diretorio?.FullName ?? Directory.GetCurrentDirectory();
+    }
+
     private static async Task<string> GerarHtmlAsync(int quantidadeProdutos)
     {
         var nfe = CriarNfe(quantidadeProdutos);
-        var danfe = new DanfeNFe(nfe, Status.Autorizada, "135240000000001", "HHunterx");
-        IDanfeHtml2 htmlDanfe = new DanfeNfeHtml2(danfe);
+        var htmlDanfe = CriarDanfeHtml(nfe);
 
         var documento = await htmlDanfe.ObterDocHtmlAsync();
 
         return documento.Html;
+    }
+
+    private static IDanfeHtml2 CriarDanfeHtml(NFeModel nfe)
+    {
+        var danfe = new DanfeNFe(nfe, Status.Autorizada, "135240000000001", "HHunterx");
+        return new DanfeNfeHtml2(danfe);
+    }
+
+    private static DanfeHtmlPdfOptions CriarOpcoesPdfTeste()
+    {
+        return new DanfeHtmlPdfOptions
+        {
+            TimeoutMilissegundos = 60000,
+            DesabilitarSandbox = RuntimeInformation.IsOSPlatform(OSPlatform.Linux) &&
+                                 string.Equals(Environment.UserName, "root", StringComparison.OrdinalIgnoreCase)
+        };
+    }
+
+    private static void AssertPdfHeader(byte[] pdf)
+    {
+        Assert.NotNull(pdf);
+        Assert.True(pdf.Length > 4);
+        Assert.Equal("%PDF", Encoding.ASCII.GetString(pdf, 0, 4));
+    }
+
+    private static void AssertPaginaA4(Page pagina)
+    {
+        Assert.InRange((double)pagina.Width, 594d, 596d);
+        Assert.InRange((double)pagina.Height, 841d, 843d);
+    }
+
+    private static string ExtrairTexto(PdfDocument documento)
+    {
+        return string.Join(Environment.NewLine, documento.GetPages().Select(pagina => pagina.Text));
     }
 
     private static NFeModel CriarNfe(int quantidadeProdutos)
